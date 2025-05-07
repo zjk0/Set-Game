@@ -4,15 +4,10 @@ from tkinter import filedialog as fd
 from PIL import Image
 from PIL import ImageTk
 import numpy as np
-from numpy.lib.stride_tricks import sliding_window_view
-import struct
 import math
 import os
 import cv2 as cv
-
-from morphology import morphology_process
-from connected import connected_analysis
-from color_space_trans import rgb_to_hsv, hsv_to_rgb, rgb_to_gray
+import ImgProc
 
 '''
 @brief 获取图像数组
@@ -40,56 +35,116 @@ def show_trans_image (image_array):
     # 显示
     trans_image_label.config(image = trans_image_tk)
 
-def image_binarization (image_array):
-    global img_rgb, img_gray, img_rgb_resize, img_gray_resize
-
-    thres = 180
-    image_array[image_array > thres] = 255
-    image_array[image_array <= thres] = 0
-    # show_trans_image(image_array)
-    return image_array
-
-def search_card ():
+'''
+@brief 获取纸牌位置和大小
+'''
+def get_cards_info ():
     global img_rgb, img_gray, img_rgb_resize, img_gray_resize
 
     # 图像二值化
-    img_bin = image_binarization(img_gray_resize)
-    # show_trans_image(img_bin)
+    img_bin = ImgProc.image_binarization(img_gray_resize, threshold = 180)
 
-    # img_rgb_resize_copy = img_rgb_resize.copy()
     contours, _ = cv.findContours(img_bin, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)  # 检测出连通域的边缘
-    cards_pos_list = []
+    cards_info_list = []  # 纸牌中心位置列表
     for contour in contours:
-        card_info = cv.minAreaRect(contour)
+        rect = cv.minAreaRect(contour)
 
-        # 根据长和宽进行二次筛选
-        if card_info[1][0] > 100 and card_info[1][1] > 100:
-            box_points = cv.boxPoints(card_info)
-            box_points = np.int32(box_points)
-            # cv.polylines(img_rgb_resize_copy, [box_points], isClosed = True, color = (0, 255, 0), thickness = 2)
-
-            card_pos = (card_info[0][1], card_info[0][0])  # (row, column)的形式
-            cards_pos_list.append(card_pos)
-
+        # 根据宽和高进行二次筛选
+        if rect[1][0] > 100 and rect[1][1] > 100:
+            # 整理成(row, column, w, h)的形式，其中 w < h
+            if rect[1][0] < rect[1][1]:  # (w, h)的形式，较短的数值被认为是w
+                card_info = (rect[0][1], rect[0][0], rect[1][0], rect[1][1])
+            else:
+                card_info = (rect[0][1], rect[0][0], rect[1][1], rect[1][0])
+            cards_info_list.append(card_info)
+            
     # 得到纸牌位置数组，并进行形状重塑和元素位置调整，调整成能与图像中纸牌一一对应的形式
-    cards_pos = np.array(cards_pos_list)
-    cards_pos = cards_pos.astype(int)
-    cards_pos = cards_pos.reshape(3, 4, 2)
-    cards_pos = cards_pos[::-1, :, :]
-    sort_index = np.argsort(cards_pos[:, :, 1])  # 对每个坐标的列坐标进行排序，得到排序后的元素在排序前数组中的索引
-    row_index = np.arange(cards_pos.shape[0])[:, None]
-    cards_pos = cards_pos[row_index, sort_index, :]
+    cards_info = np.array(cards_info_list)  # 转换为numpy数组
+    cards_info = cards_info.astype(int)
+    cards_info = cards_info.reshape(3, 4, 4)
+    cards_info = cards_info[::-1, :, :]
+    sort_index = np.argsort(cards_info[:, :, 1])  # 对每个坐标的列坐标进行排序，得到排序后的元素在排序前数组中的索引
+    row_index = np.arange(cards_info.shape[0])[:, None]
+    cards_info = cards_info[row_index, sort_index, :]
 
-    # print(cards_pos)
-    # print(cards_info.shape)
+    return cards_info
 
-    # show_trans_image(img_rgb_resize_copy)
+'''
+@brief 获取纸牌的颜色
+'''
+def get_color ():
+    pass
 
-    return cards_pos
+'''
+@brief 获取纸牌中的图形
+'''
+def get_appearance ():
+    pass
+
+'''
+@brief 获取纸牌中的图形的数量
+'''
+def get_number (cards_info):
+    global img_rgb, img_gray, img_rgb_resize, img_gray_resize
+
+    # 图像二值化
+    img_bin = ImgProc.image_binarization(img_gray_resize, threshold = 180)
+
+    # 开运算，消除条纹，使条纹变为实心，此时有实心和空心两种纹路
+    img_bin = ImgProc.morphology_process(img_bin, method = "opening", dilation_se_size = 7, erosion_se_size = 9)
+    show_trans_image(img_bin)
+
+    number_matrix = np.zeros((3, 4))
+    cards_info_ = cards_info.reshape(-1, 4)
+    for card_info in cards_info_:
+        count = 0  # 记录数值变化的次数
+        first_to_second = 0  # 记录第一次变化到第二次变化的距离
+        center = (card_info[0], card_info[1])
+
+        # 减5的目的：图形与纸牌边界有一定距离，减5可以使得在遍历时，不会遍历到纸牌外的区域
+        for i in range(center[0], (center[0] + int(card_info[3] / 2) - 5)):
+            if i != center[0]:
+                if img_bin[i, center[1]] != img_bin[i - 1, center[1]]:  # 数值变化，次数加1
+                    count += 1
+                    
+                if count == 1:
+                    first_to_second += 1
+
+        index = np.where(np.all(cards_info == card_info, axis = -1))
+        if count == 3 or count == 6:  # 次数为3（空心纹路）或6（实心纹路）
+            number_matrix[index] = 3
+        elif count == 4:  # 次数为4（实心纹路）
+            number_matrix[index] = 2
+        elif count == 1:  # 次数为1（空心纹路）
+            number_matrix[index] = 1
+        elif count == 2:  # 次数为2
+            if first_to_second > 10:  # 距离较长（实心纹路）
+                number_matrix[index] = 2
+            else:  # 距离较短（空心纹路）
+                number_matrix[index] = 1
+
+    return number_matrix
+    
+'''
+@brief 获取图形中的纹路
+'''
+def get_texture (cards_info):
+    global img_rgb, img_gray, img_rgb_resize, img_gray_resize
+    
 
 def test_func ():
-    search_card()
+    global img_rgb, img_gray, img_rgb_resize, img_gray_resize
 
+    cards_info = get_cards_info()
+    get_number(cards_info)
+    # img_bin = ImgProc.image_binarization(img_gray_resize, threshold = 180)
+    # # show_trans_image(img_bin)
+    # img_bin = ImgProc.morphology_process(img_bin, method = "opening", dilation_se_size = 7, erosion_se_size = 9)
+    # show_trans_image(img_bin)
+
+'''
+@brief 文件操作函数
+'''
 def file_operation ():
     global img_rgb, img_gray, img_rgb_resize, img_gray_resize, rgb_tk, gray_tk
 
