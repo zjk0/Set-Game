@@ -4,10 +4,8 @@ from tkinter import filedialog as fd
 from PIL import Image
 from PIL import ImageTk
 import numpy as np
-import math
-import os
 import cv2 as cv
-import ImgProc
+from numpy.lib.stride_tricks import sliding_window_view
 
 '''
 @brief 获取图像数组
@@ -20,6 +18,94 @@ def get_image_data (image):
     (width, height) = image.size  # 获取图像的宽和高
     image_array = np.array(image)  # 获取图像的像素数据并转化为数组
     return height, width, image_array
+
+'''
+@brief RGB空间转换到HSV空间
+@param image_array: rgb图像数组
+@param hsv_image_array: hsv图像数组
+'''
+def rgb_to_hsv (image_array):
+    image = Image.fromarray(image_array, mode = 'RGB')
+    image = image.convert("HSV")
+    hsv_image_array = np.array(image)
+    return hsv_image_array
+
+'''
+@brief 形态学处理
+@param image_array: 二值化图像数组
+@param method: 形态学处理方法, 可选: "dilation", "erosion", "opening", "closing"
+@param dilation_size: 膨胀核大小, 默认为3
+@param erosion_size: 腐蚀核大小, 默认为3
+@return result: 形态学处理结果
+'''
+def morphology_process (image_array, method, dilation_se_size = 3, erosion_se_size = 3):
+    # 获取图像行数和列数
+    rows = image_array.shape[0]
+    columns = image_array.shape[1]
+
+    # 膨胀或者腐蚀
+    if method == "dilation" or method == "erosion":
+        # 获取结构元大小
+        if method == "dilation":
+            se_size = dilation_se_size
+        elif method == "erosion":
+            se_size = erosion_se_size
+
+        # 边缘填充，采用零填充
+        new_rows = rows + se_size - 1
+        new_columns = columns + se_size - 1
+        expand_array = np.zeros((new_rows, new_columns))
+        offset = int((se_size - 1) / 2)
+        expand_array[offset : rows + offset, offset : columns + offset] = np.copy(image_array)
+
+        # 形态学处理
+        se = np.ones((se_size, se_size))
+        windows = sliding_window_view(expand_array, (se_size, se_size))
+        if method == "dilation":
+            result = np.max(np.multiply(windows[:, :], se), axis = (-2, -1))
+        elif method == "erosion":
+            result = np.min(np.multiply(windows[:, :], se), axis = (-2, -1))
+    # 开运算或者闭运算
+    elif method == "opening" or method == "closing":
+        # 获取两个结构元大小
+        if method == "opening":
+            se_size_1 = erosion_se_size
+            se_size_2 = dilation_se_size
+        elif method == "closing":
+            se_size_1 = dilation_se_size
+            se_size_2 = erosion_se_size
+
+        # 第一次边缘填充，采用零填充
+        new_rows = rows + se_size_1 - 1
+        new_columns = columns + se_size_1 - 1
+        expand_array_1 = np.zeros((new_rows, new_columns))
+        offset = int((se_size_1 - 1) / 2)
+        expand_array_1[offset : rows + offset, offset : columns + offset] = np.copy(image_array)
+
+        # 第一次形态学处理
+        se_1 = np.ones((se_size_1, se_size_1))
+        windows_1 = sliding_window_view(expand_array_1, (se_size_1, se_size_1))
+        if method == "opening":  # 先进行腐蚀
+            result = np.min(np.multiply(windows_1[:, :], se_1), axis = (-2, -1))
+        elif method == "closing":  # 先进行膨胀
+            result = np.max(np.multiply(windows_1[:, :], se_1), axis = (-2, -1))
+
+        # 第二次边缘填充，采用零填充
+        new_rows = rows + se_size_2 - 1
+        new_columns = columns + se_size_2 - 1
+        expand_array_2 = np.zeros((new_rows, new_columns))
+        offset = int((se_size_2 - 1) / 2)
+        expand_array_2[offset : rows + offset, offset : columns + offset] = np.copy(result)
+
+        # 第二次形态学处理
+        se_2 = np.ones((se_size_2, se_size_2))
+        windows_2 = sliding_window_view(expand_array_2, (se_size_2, se_size_2))
+        if method == "opening":  # 后进行膨胀
+            result = np.max(np.multiply(windows_2[:, :], se_2), axis = (-2, -1))
+        elif method == "closing":  # 后进行腐蚀
+            result = np.min(np.multiply(windows_2[:, :], se_2), axis = (-2, -1))
+
+    return result
 
 '''
 @brief 显示转换后的图像
@@ -51,8 +137,8 @@ def get_cards_info (img_preproc):
 
         # 根据宽和高进行二次筛选
         if rect[1][0] > 100 and rect[1][1] > 100:
-            if rect[1][0] > 200 or rect[1][1] > 200:  # 两张牌距离太近, 被识别成同一连通域
-                if rect[1][0] > 200 and rect[1][1] < 200:
+            if rect[1][0] > 210 or rect[1][1] > 210:  # 两张牌距离太近, 被识别成同一连通域
+                if rect[1][0] > 210 and rect[1][1] < 210:
                     # 两张纸牌相连方向上的长度除以2, 得到正常情况下的数值
                     value = int(rect[1][0] / 2)
 
@@ -71,7 +157,7 @@ def get_cards_info (img_preproc):
                         # 确定两张牌的中心
                         center1 = (rect[0][1] - value / 2, rect[0][0])
                         center2 = (rect[0][1] + value / 2, rect[0][0])
-                elif rect[1][0] < 200 and rect[1][1] > 200:
+                elif rect[1][0] < 210 and rect[1][1] > 210:
                     # 两张纸牌相连方向上的长度除以2, 得到正常情况下的数值
                     value = int(rect[1][1] / 2)
 
@@ -96,7 +182,7 @@ def get_cards_info (img_preproc):
                 card_info2 = (center2[0], center2[1], w, h)
                 cards_info_list.append(card_info1)
                 cards_info_list.append(card_info2)
-            elif rect[1][0] < 200 and rect[1][1] < 200:  # 距离正常
+            elif rect[1][0] <= 210 and rect[1][1] <= 210:  # 距离正常
                 # 较短的数值被认为是w
                 if rect[1][0] < rect[1][1]:
                     card_info = (rect[0][1], rect[0][0], rect[1][0], rect[1][1])
@@ -114,8 +200,6 @@ def get_cards_info (img_preproc):
     row_index = np.arange(cards_info.shape[0])[:, None]
     cards_info = cards_info[row_index, sort_index, :]
 
-    # print("cards_info:")
-    # print(cards_info)
     return cards_info
 
 '''
@@ -137,7 +221,7 @@ def get_color (img_rgb, cards_info):
         roi = img_rgb[row_min : row_max + 1, column_min : column_max + 1, :]
 
         # 转换为hsv空间
-        roi_hsv = ImgProc.rgb_to_hsv(roi) 
+        roi_hsv = rgb_to_hsv(roi) 
 
         # 遍历经过感兴趣区域中心点的竖直直线来进行颜色检测
         index = np.where(np.all(cards_info == card_info, axis = -1))
@@ -163,8 +247,6 @@ def get_color (img_rgb, cards_info):
                 color_matrix[index] = 3
                 break
 
-    # print("color:")
-    # print(color_matrix)
     return color_matrix
 
 '''
@@ -189,7 +271,7 @@ def get_appearance (img_gray, cards_info):
 
         # 对感兴趣区域进行预处理
         roi_edge = cv.Canny(roi, 100, 200)
-        roi_preproc = ImgProc.morphology_process(roi_edge, method = "closing", dilation_se_size = 9, erosion_se_size = 7)
+        roi_preproc = morphology_process(roi_edge, method = "closing", dilation_se_size = 9, erosion_se_size = 7)
         roi_preproc = roi_preproc.astype(np.uint8)
         
         # 通过计算圆度来进行第一次筛选
@@ -221,8 +303,6 @@ def get_appearance (img_gray, cards_info):
         else:
             appearance_matrix[index] = 1  # 如果检测到的直线的数量较多, 说明图形形状为菱形
 
-    print("appearance:")
-    print(appearance_matrix)
     return appearance_matrix
 
 '''
@@ -245,7 +325,7 @@ def get_number (img_gray, cards_info):
 
         # 对感兴趣区域进行预处理
         roi_edge = cv.Canny(roi, 100, 200)
-        roi_preproc = ImgProc.morphology_process(roi_edge, method = "closing", dilation_se_size = 9, erosion_se_size = 7)
+        roi_preproc = morphology_process(roi_edge, method = "closing", dilation_se_size = 9, erosion_se_size = 7)
         roi_preproc = roi_preproc.astype(np.uint8)
 
         # 检测个数
@@ -258,8 +338,6 @@ def get_number (img_gray, cards_info):
         index = np.where(np.all(cards_info == card_info, axis = -1))
         number_matrix[index] = count
 
-    # print("number:")
-    # print(number_matrix)
     return number_matrix
     
 '''
@@ -319,8 +397,6 @@ def get_texture (img_gray, cards_info, number):
         else:  # 如果均值较大, 说明图形内部像素值较低, 说明纹路为实心
             texture_matrix[index] = 2
 
-    # print("texture:")
-    # print(texture_matrix)
     return texture_matrix
 
 '''
@@ -378,8 +454,6 @@ def search_set_pos (cards_feature):
                     set_pos_list.append(set_pos)
     
     all_set_pos = np.array(set_pos_list)  # 转换为数组
-    # print("all set pos:")
-    # print(all_set_pos)
     return all_set_pos
 
 '''
@@ -445,7 +519,6 @@ def search_set ():
 
     # 预处理
     img_preproc = image_preprocess(img_gray_resize, threshold = 125)
-    # show_trans_image(img_preproc)
 
     # 获取纸牌特征
     cards_info = get_cards_info(img_preproc)  # 获取纸牌信息
